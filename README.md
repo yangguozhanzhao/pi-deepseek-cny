@@ -1,5 +1,9 @@
 # pi-deepseek-cny
 
+[![CI](https://github.com/yangguozhanzhao/pi-deepseek-cny/actions/workflows/ci.yml/badge.svg)](https://github.com/yangguozhanzhao/pi-deepseek-cny/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/pi-deepseek-cny.svg)](https://www.npmjs.com/package/pi-deepseek-cny)
+[![license](https://img.shields.io/npm/l/pi-deepseek-cny.svg)](./LICENSE)
+
 为 DeepSeek 用户优化的 [Pi](https://pi.dev) 扩展：在 footer 里常驻显示**人民币峰谷计价的费用统计**。
 
 ## 功能

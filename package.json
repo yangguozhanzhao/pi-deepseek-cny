@@ -4,7 +4,13 @@
   "description": "为 DeepSeek 用户优化的 Pi 扩展包：人民币峰谷计价的 footer 状态行",
   "type": "module",
   "license": "MIT",
-  "author": "yangguozhanzhao",
+  "author": {
+    "name": "yangguozhanzhao",
+    "email": "728074993@qq.com"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yangguozhanzhao/pi-deepseek-cny.git"
@@ -21,7 +27,9 @@
     "pi",
     "deepseek",
     "pricing",
-    "cny"
+    "cny",
+    "cost",
+    "footer"
   ],
   "pi": {
     "extensions": [
