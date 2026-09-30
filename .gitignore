@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+
+# npm pack 产物
+*.tgz
+
+# Pi 本地配置
+.pi/
