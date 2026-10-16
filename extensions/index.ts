@@ -51,10 +51,12 @@ interface CostBuckets {
 	cacheWarm: number;
 	/** 主调用 token 总数（用于折算每亿 token 均价，不含 cache_warm）。 */
 	tokens: number;
+	/** 本轮会话的轮数（一个 user 消息到下一个 user 消息之前 = 1 轮）。 */
+	turns: number;
 }
 
 function emptyBuckets(): CostBuckets {
-	return { total: 0, peak: 0, offPeak: 0, input: 0, cacheRead: 0, output: 0, cacheWarm: 0, tokens: 0 };
+	return { total: 0, peak: 0, offPeak: 0, input: 0, cacheRead: 0, output: 0, cacheWarm: 0, tokens: 0, turns: 0 };
 }
 
 /**
@@ -88,7 +90,7 @@ function addCost(
 }
 
 /** 当前时段名称：高峰“峰” / 空闲“谷”。 */
-function peakName(peak: boolean): string {
+function peakName(peak: boolean): "峰" | "谷" {
 	return peak ? "峰" : "谷";
 }
 
@@ -103,17 +105,25 @@ function rateLabel(rates: { input: number; cacheRead: number; output: number }):
 /**
  * 组装 footer 状态行文本（人民币元）。
  * 格式：
- *   谷 ¥1.00/¥0.02/¥4.00 ｜¥0.05 + ¥0.04 + ¥0.09 = 峰¥0.00 + 谷¥0.19 = 总¥0.19｜单价 ¥5.95/亿
- * 顺序：三档费用 = 峰 + 谷 = 总 ｜ 均价（元/亿 token）。
+ *   峰 ¥2.00/¥0.04/¥8.00 ｜¥0.35 + ¥0.35 + ¥0.46 = 峰¥0.63 + 谷¥0.53 = 总¥1.16｜¥9.92/亿|￥4.11/轮|
+ * 顺序：三档费用 = 峰 + 谷 = 总 ｜ 均价（元/亿 token）｜ 每轮均价。
  * 均价 = 总费用 / 总 token * 1e8；无 token 时显示 ¥0.00。
+ * 每轮均价 = 总费用 / 轮数；无轮时显示 ¥0.00。
+ * “峰” 用红色、“谷” 用绿色（由调用方传入着色函数）。
  * 末尾 4 个空格：与其它扩展的状态行在视觉上分隔开。
  */
-function statusText(peak: boolean, buckets: CostBuckets, rateText: string): string {
+function statusText(
+	peak: boolean,
+	buckets: CostBuckets,
+	rateText: string,
+	color: (name: "峰" | "谷") => string,
+): string {
 	const tiers = `${cny(buckets.input)} + ${cny(buckets.cacheRead)} + ${cny(buckets.output)}`;
-	const byPeriod = `峰${cny(buckets.peak)} + 谷${cny(buckets.offPeak)}`;
+	const byPeriod = `${color("峰")}${cny(buckets.peak)} + ${color("谷")}${cny(buckets.offPeak)}`;
 	const avgPerYi = buckets.tokens > 0 ? (buckets.total / buckets.tokens) * 1e8 : 0;
-	const head = rateText ? `${peakName(peak)} ${rateText}` : peakName(peak);
-	return `${head} ｜${tiers} = ${byPeriod} = 总${cny(buckets.total)}｜单价 ${cny(avgPerYi)}/亿    `;
+	const avgPerTurn = buckets.turns > 0 ? buckets.total / buckets.turns : 0;
+	const head = rateText ? `${color(peakName(peak))} ${rateText}` : color(peakName(peak));
+	return `${head} ｜${tiers} = ${byPeriod} = 总${cny(buckets.total)}｜${cny(avgPerYi)}/亿|${cny(avgPerTurn)}/轮|    `;
 }
 
 /** 从消息时间取年份（北京时间）。 */
@@ -231,9 +241,10 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 		return rateLabel(selectRates(modelPricing, peak));
 	}
 
-	/** 刷新 footer 状态行（dim 着色，与默认 footer 其它行一致）。 */
+	/** 刷新 footer 状态行（默认 dim，仅 “峰” 红、“谷” 绿）。 */
 	function refreshStatus(ui: ExtensionUIContext, peak: boolean, model: string | undefined): void {
-		ui.setStatus(STATUS_KEY, ui.theme.fg("dim", statusText(peak, buckets, currentRates(model, peak))));
+		const color = (name: "峰" | "谷") => ui.theme.fg(name === "峰" ? "error" : "success", name);
+		ui.setStatus(STATUS_KEY, ui.theme.fg("dim", statusText(peak, buckets, currentRates(model, peak), color)));
 	}
 
 	/**
@@ -276,6 +287,11 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 			const entry = raw as CostBearingEntry;
 			if (entry.type === "message") {
 				const m = entry.message;
+				// 每个 user 消息开启一轮（仅计数，不参与费用）。
+				if (m?.role === "user") {
+					result.turns += 1;
+					continue;
+				}
 				if (m?.role !== "assistant" || m.provider !== DEEPSEEK_PROVIDER) continue;
 				if (typeof m.model !== "string" || typeof m.timestamp !== "number") continue;
 				const cost = await costOf(m.model, m.timestamp, m.usage ?? {});
@@ -331,5 +347,23 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 
 		// 时段与单价均用该条消息自身的模型与时间。
 		refreshStatus(ctx.ui, cost?.peak ?? false, assistant.model);
+	});
+
+	// 每轮开始计数（“每轮均价”的分母）。历史部分已由 recomputeFromHistory 计入 user 消息，
+	// 这里只累加新的轮次；若历史尚未就绪，先重算避免漏计。
+	pi.on("turn_start", async (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		if (ctx.model?.provider !== DEEPSEEK_PROVIDER) return;
+
+		if (!sessionReady) {
+			await ensurePricing(ctx);
+			if (!pricing) return;
+			buckets = await recomputeFromHistory(ctx.sessionManager);
+			sessionReady = true;
+			return; // 当前轮已由历史重算计入，不再 +1。
+		}
+		buckets.turns += 1;
+		// 分母变化，刷新状态行（时段/单价用当前值）。
+		refreshStatus(ctx.ui, await isPeakAt(new Date()), ctx.model?.id);
 	});
 }

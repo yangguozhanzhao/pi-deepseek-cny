@@ -1,6 +1,6 @@
 {
   "name": "pi-deepseek-cny",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "为 DeepSeek 用户优化的 Pi 扩展包：人民币峰谷计价的 footer 状态行",
   "type": "module",
   "license": "MIT",
