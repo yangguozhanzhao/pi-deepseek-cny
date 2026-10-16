@@ -50,11 +50,11 @@
 
 不计入：
 
-- `toolResult` 消息（数据结构不含 provider/model，无法归属）。
+- `toolResult` 消息（其 `usage` 为工具内嵌模型调用，且消息不带 provider/model，无法可靠归属到 deepseek）。
 
 统计由两种方式得出：
 
-- 启动时（`session_start`）扫描会话历史全量重算，因此**恢复旧会话也能正确累计**。
+- 启动时（`session_start`）扫描**当前分支**（`getBranch()`）全量重算，因此**恢复旧会话也能正确累计**，且不会重复计入编辑/重试产生的废弃分支。
 - 之后每条消息结束时（`message_end`）增量累加。
 
 ## 安装

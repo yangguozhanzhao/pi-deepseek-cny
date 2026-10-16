@@ -260,13 +260,19 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * 扫描 session 历史重算聚合费用（人民币元）。
+	 * 扫描 session 分支重算聚合费用（人民币元）。
 	 * 纳入：deepseek 的 assistant 消息 + 带 provider/model 的 usage 条目（如 cache_warm）。
 	 * 只读历史，不读也不改写落盘的 usage.cost；用于启动时初始化（支持恢复旧会话）。
+	 *
+	 * 用 getBranch() 而非 getEntries()：只统计当前分支，
+	 * 避免把编辑/重试产生的废弃分支重复计入（pi 官方建议）。
+	 *
+	 * 不统计 toolResult：其 usage 为工具内嵌模型调用，消息不带 provider/model，
+	 * 无法可靠归属到 deepseek，计入会高估费用。
 	 */
-	async function recomputeFromHistory(sessionManager: { getEntries(): unknown[] }): Promise<CostBuckets> {
+	async function recomputeFromHistory(sessionManager: { getBranch(): unknown[] }): Promise<CostBuckets> {
 		const result = emptyBuckets();
-		for (const raw of sessionManager.getEntries()) {
+		for (const raw of sessionManager.getBranch()) {
 			const entry = raw as CostBearingEntry;
 			if (entry.type === "message") {
 				const m = entry.message;
