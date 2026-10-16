@@ -19,6 +19,18 @@ function cny(n: number): string {
 }
 
 /**
+ * 一次调用的三档 token（未命中输入 / 命中读 / 输出），不含 cacheWrite。
+ * 与费用三档、均价分母同源，避免口径不一致。
+ */
+function tokenTiers(usage: Partial<TokenUsage> | undefined): { input: number; cacheRead: number; output: number } {
+	return {
+		input: usage?.input ?? 0,
+		cacheRead: usage?.cacheRead ?? 0,
+		output: usage?.output ?? 0,
+	};
+}
+
+/**
  * 会话费用聚合（人民币元）。
  * 口径：total = peak + off-peak = miss + hit + output；cache_warm 完全独立，不计入以上任何项。
  */
@@ -37,18 +49,28 @@ interface CostBuckets {
 	output: number;
 	/** cache_warm 预热调用产生的费用（完全独立，不计入 total / 时段 / 档位）。 */
 	cacheWarm: number;
+	/** 主调用 token 总数（用于折算每亿 token 均价，不含 cache_warm）。 */
+	tokens: number;
 }
 
 function emptyBuckets(): CostBuckets {
-	return { total: 0, peak: 0, offPeak: 0, input: 0, cacheRead: 0, output: 0, cacheWarm: 0 };
+	return { total: 0, peak: 0, offPeak: 0, input: 0, cacheRead: 0, output: 0, cacheWarm: 0, tokens: 0 };
 }
 
 /**
  * 把一次计费的明细并入聚合。
- * 主调用：计入 total / 时段 / 三档（三者恒等）。
+ * 主调用：计入 total / 时段 / 三档（三者恒等）以及三档 token（自统，与均价分母同源）。
  * cache_warm：只计入 cache_warm，不影响其它项。
+ *
+ * tokens：本次调用的三档 token 用量（不含 cacheWrite）。cache_warm 不计入。
  */
-function addCost(buckets: CostBuckets, breakdown: CostBreakdown, peak: boolean, isCacheWarm: boolean): void {
+function addCost(
+	buckets: CostBuckets,
+	breakdown: CostBreakdown,
+	peak: boolean,
+	isCacheWarm: boolean,
+	tokens: { input: number; cacheRead: number; output: number },
+): void {
 	if (isCacheWarm) {
 		buckets.cacheWarm += breakdown.total;
 		return;
@@ -62,34 +84,36 @@ function addCost(buckets: CostBuckets, breakdown: CostBreakdown, peak: boolean, 
 	buckets.input += breakdown.input;
 	buckets.cacheRead += breakdown.cacheRead;
 	buckets.output += breakdown.output;
+	buckets.tokens += tokens.input + tokens.cacheRead + tokens.output;
 }
 
-/** 当前时段图标：高峰 ▲ / 空闲 ▼。 */
-function peakIcon(peak: boolean): string {
-	return peak ? "▲" : "▼";
+/** 当前时段名称：高峰“峰” / 空闲“谷”。 */
+function peakName(peak: boolean): string {
+	return peak ? "峰" : "谷";
 }
 
 /**
- * 当前时段单价标签（元 / 百万 tokens）：图标后紧跟着显示。
- * 格式：miss ¥x · hit ¥y · out ¥z
+ * 当前时段单价标签（元 / 百万 tokens）：时段名后紧跟。
+ * 三档用“/”分隔，顺序固定为 miss/hit/out。
  */
 function rateLabel(rates: { input: number; cacheRead: number; output: number }): string {
-	return `miss ${cny(rates.input)} · hit ${cny(rates.cacheRead)} · out ${cny(rates.output)}`;
+	return `${cny(rates.input)}/${cny(rates.cacheRead)}/${cny(rates.output)}`;
 }
 
 /**
  * 组装 footer 状态行文本（人民币元）。
- * 用两个等号把恒等式写成“可自证”的一行：
- *   ▲ miss ¥x · hit ¥y · out ¥z ｜ total = peak + off-peak = miss + hit + output ｜ warm
+ * 格式：
+ *   谷 ¥1.00/¥0.02/¥4.00 ｜¥0.05 + ¥0.04 + ¥0.09 = 峰¥0.00 + 谷¥0.19 = 总¥0.19｜单价 ¥5.95/亿
+ * 顺序：三档费用 = 峰 + 谷 = 总 ｜ 均价（元/亿 token）。
+ * 均价 = 总费用 / 总 token * 1e8；无 token 时显示 ¥0.00。
+ * 末尾 4 个空格：与其它扩展的状态行在视觉上分隔开。
  */
 function statusText(peak: boolean, buckets: CostBuckets, rateText: string): string {
-	const main = [
-		`total ${cny(buckets.total)}`,
-		`peak ${cny(buckets.peak)} + off-peak ${cny(buckets.offPeak)}`,
-		`miss ${cny(buckets.input)} + hit ${cny(buckets.cacheRead)} + output ${cny(buckets.output)}`,
-	].join(" = ");
-	const head = rateText ? `${peakIcon(peak)} ${rateText}` : peakIcon(peak);
-	return `${head} ｜ ${main} ｜ warm ${cny(buckets.cacheWarm)}`;
+	const tiers = `${cny(buckets.input)} + ${cny(buckets.cacheRead)} + ${cny(buckets.output)}`;
+	const byPeriod = `峰${cny(buckets.peak)} + 谷${cny(buckets.offPeak)}`;
+	const avgPerYi = buckets.tokens > 0 ? (buckets.total / buckets.tokens) * 1e8 : 0;
+	const head = rateText ? `${peakName(peak)} ${rateText}` : peakName(peak);
+	return `${head} ｜${tiers} = ${byPeriod} = 总${cny(buckets.total)}｜单价 ${cny(avgPerYi)}/亿    `;
 }
 
 /** 从消息时间取年份（北京时间）。 */
@@ -197,7 +221,7 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * 取某模型在某峰谷下的单价标签（元 / 百万 tokens），用于图标后展示。
+	 * 取某模型在某峰谷下的单价标签（元 / 百万 tokens），用于时段名后展示。
 	 * 模型名缺失或无定价表时返回空字符串。
 	 */
 	function currentRates(model: string | undefined, peak: boolean): string {
@@ -249,7 +273,7 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 				if (m?.role !== "assistant" || m.provider !== DEEPSEEK_PROVIDER) continue;
 				if (typeof m.model !== "string" || typeof m.timestamp !== "number") continue;
 				const cost = await costOf(m.model, m.timestamp, m.usage ?? {});
-				if (cost) addCost(result, cost.breakdown, cost.peak, false);
+				if (cost) addCost(result, cost.breakdown, cost.peak, false, tokenTiers(m.usage));
 			} else if (entry.type === "usage") {
 				// usage 条目（如 cache_warm）自带 provider/model/timestamp/usage。
 				if (entry.provider !== DEEPSEEK_PROVIDER) continue;
@@ -257,7 +281,7 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 				const ts = Date.parse(entry.timestamp);
 				if (Number.isNaN(ts)) continue;
 				const cost = await costOf(entry.model, ts, entry.usage ?? {});
-				if (cost) addCost(result, cost.breakdown, cost.peak, entry.kind === "cache_warm");
+				if (cost) addCost(result, cost.breakdown, cost.peak, entry.kind === "cache_warm", tokenTiers(entry.usage));
 			}
 		}
 		return result;
@@ -297,7 +321,7 @@ export default function piDeepseekCn(pi: ExtensionAPI): void {
 		}
 
 		const cost = await costOf(assistant.model, assistant.timestamp, assistant.usage ?? {});
-		if (cost) addCost(buckets, cost.breakdown, cost.peak, false);
+		if (cost) addCost(buckets, cost.breakdown, cost.peak, false, tokenTiers(assistant.usage));
 
 		// 时段与单价均用该条消息自身的模型与时间。
 		refreshStatus(ctx.ui, cost?.peak ?? false, assistant.model);
